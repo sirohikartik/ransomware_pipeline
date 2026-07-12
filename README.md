@@ -22,7 +22,7 @@ head -5 ./logs_conti/features.csv
 wc -l ./logs_conti/features.csv
 
 ---
-*Note: For some binaries they may require different .so files for execution so if any error occurs please carefully download the required .so files and other dependencies as the monitor.sh file only downloads the bare minimum dependencies and measurement tools.*
+##### *Note: For some binaries they may require different .so files for execution so if any error occurs please carefully download the required .so files and other dependencies as the monitor.sh file only downloads the bare minimum dependencies and measurement tools.*
 ---
 
 This pipeline was created using coding assistance of Qwen 3.7 Plus
