@@ -20,3 +20,6 @@ python3 parse_logs.py --logdir ./logs_conti --out ./logs_conti/features.csv
 ### 6. Verify
 head -5 ./logs_conti/features.csv
 wc -l ./logs_conti/features.csv
+
+
+*Note: For some binaries they may require different .so files for execution so if any error occurs please carefully download the required .so files and other dependencies as the monitor.sh file only downloads the bare minimum dependencies and measurement tools.*
