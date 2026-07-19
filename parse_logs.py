@@ -27,36 +27,20 @@ TARGET_EXTENSIONS = {
     '.kitty', '.locked', '.conti', '.wasted', '.encrypted', '.spooky'
 }
 
-# Regex handles BOTH timestamp formats:
-#   - Epoch:        1720623123.456789
-#   - Wall-clock:   07:56:16.206908
-# And BOTH strace output styles:
-#   - "TIMESTAMP SYSCALL(...)"              (native)
-#   - "PID TIMESTAMP SYSCALL(...)"          (strace -f)
-LINE_PAT = re.compile(
-    r'^\s*(?:(\d+)\s+)?'                # optional PID
-    r'(?:(\d{2}:\d{2}:\d{2}\.\d+)'      # group 2: wall-clock OR
-    r'|(\d+\.\d+))'                      # group 3: epoch
-    r'\s+([a-zA-Z_]\w*)\('              # group 4: syscall name
-)
-RET_PAT       = re.compile(r'\)\s*=\s*(-?\d+)')
-PATH_PAT      = re.compile(r'"([^"]*)"')
-IP_PAT        = re.compile(r'inet_addr\("([^"]+)"\)')
-PORT_PAT      = re.compile(r'sin_port=htons\((\d+)\)')
+# Regex handles BOTH formats:
+#   "TIMESTAMP SYSCALL(...)"              (native)
+#   "PID TIMESTAMP SYSCALL(...)"          (strace -f)
+LINE_PAT = re.compile(r'^\s*(?:(\d+)\s+)?((?:\d+:){0,2}\d+\.\d+)\s+([a-zA-Z_]\w*)\(')
+RET_PAT  = re.compile(r'\)\s*=\s*(-?\d+)')
+PATH_PAT = re.compile(r'"([^"]*)"')
+IP_PAT   = re.compile(r'inet_addr\("([^"]+)"\)')
+PORT_PAT = re.compile(r'sin_port=htons\((\d+)\)')
 MMAP_SIZE_PAT = re.compile(r'mmap\([^,]+,\s*(\d+),')
 
 
-def _ts_to_seconds(ts_str: str) -> float:
-    """Convert either epoch or HH:MM:SS.microseconds to float seconds."""
-    if ':' in ts_str:
-        h, m, s = ts_str.split(':')
-        return int(h) * 3600 + int(m) * 60 + float(s)
-    return float(ts_str)
-
-
-def _empty_window():
-    """Return a fresh, correctly-typed window dict."""
-    return {
+def parse_strace(log_path):
+    """Parse strace.log into per-100ms-window feature dicts."""
+    windows = defaultdict(lambda: {
         'bytes_read': 0, 'bytes_written': 0, 'file_deletions': 0,
         'file_renames': 0, 'target_extensions': 0, 'lseek_calls': 0,
         'urandom_bytes': 0, 'mmap_bytes': 0, 'mprotect_calls': 0,
@@ -64,12 +48,7 @@ def _empty_window():
         'unique_ips': set(), 'dns_queries': 0, 'conn_failures': 0,
         'child_processes': 0, 'execve_calls': 0, 'syscall_types': [],
         'dir_ops': 0, 'drop_rate': 0, 'library_calls': 0,
-    }
-
-
-def parse_strace(log_path):
-    """Parse strace.log into per-100ms-window feature dicts."""
-    windows = defaultdict(_empty_window)
+    })
 
     first_ts = None
     total_bytes_written = []  # (timestamp, bytes) for slope calc
@@ -84,14 +63,13 @@ def parse_strace(log_path):
                 continue
 
             parsed += 1
-
-            # Handle both timestamp formats
-            if m.group(2):  # Wall-clock format HH:MM:SS.microseconds
-                ts = _ts_to_seconds(m.group(2))
-            else:           # Epoch format
-                ts = float(m.group(3))
-
-            sc = m.group(4)
+            ts_str = m.group(2)
+            if ':' in ts_str:
+                parts = ts_str.split(':')
+                ts = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+            else:
+                ts = float(ts_str)
+            sc = m.group(3)
 
             ret_m = RET_PAT.search(line)
             ret = int(ret_m.group(1)) if ret_m else 0
@@ -155,6 +133,8 @@ def parse_strace(log_path):
                         w['mmap_bytes'] += int(sm.group(1))
                     except ValueError:
                         pass
+            if sc in ('brk', 'mremap'):
+                w['mmap_bytes'] += 0  # counted separately if needed
             if sc == 'mprotect':
                 w['mprotect_calls'] += 1
 
@@ -277,26 +257,18 @@ def main():
     # Parse main trace
     windows, first_ts, first_enc_ts, total_bytes_written = parse_strace(log_file)
 
-    header = [
-        'window_idx', 'window_start_s',
-        'bytes_read_per_sec', 'bytes_written_per_sec', 'rw_volume_ratio',
-        'file_deletion_rate', 'file_rename_rate', 'target_extension_velocity',
-        'seq_vs_random_disk_ratio', 'urandom_bytes_per_sec',
-        'mmap_brk_rate', 'mprotect_rate', 'futex_rate',
-        'net_packet_rate', 'net_byte_volume', 'unique_dest_ip_rate',
-        'dns_query_rate', 'connection_failure_rate',
-        'child_spawn_rate', 'execve_rate',
-        'syscall_sequence_entropy', 'io_burstiness_std',
-        'dir_ops', 'drop_rate', 'ransom_note_hits', 'library_call_rate_openssl',
-        'vmrss_kb', 'mean_file_entropy',
-        'time_to_first_encryption_s', 'encryption_slope', 'file_entropy_delta',
-    ]
-
     if not windows:
         print(f"[!] No syscalls parsed from {log_file}. Output will be empty.")
-        with open(out_path, 'w', newline='') as f:
-            w = csv.writer(f)
-            w.writerow(header)
+        with open(out_path, 'w') as f:
+            f.write("window_idx,window_start_s,bytes_read_per_sec,bytes_written_per_sec,"
+                    "rw_volume_ratio,file_deletion_rate,file_rename_rate,"
+                    "target_extension_velocity,seq_vs_random_disk_ratio,"
+                    "urandom_bytes_per_sec,mmap_brk_rate,mprotect_rate,futex_rate,"
+                    "net_packet_rate,net_byte_volume,unique_dest_ip_rate,dns_query_rate,"
+                    "connection_failure_rate,child_spawn_rate,execve_rate,"
+                    "syscall_sequence_entropy,io_burstiness_std,dir_ops,drop_rate,"
+                    "ransom_note_hits,library_call_rate_openssl,vmrss_kb,mean_file_entropy,"
+                    "time_to_first_encryption_s,encryption_slope,file_entropy_delta\n")
         return
 
     # Global features
@@ -315,13 +287,30 @@ def main():
     max_window = max(windows.keys())
     bytes_written_history = []  # for IO burstiness
 
+    header = [
+        'window_idx', 'window_start_s',
+        'bytes_read_per_sec', 'bytes_written_per_sec', 'rw_volume_ratio',
+        'file_deletion_rate', 'file_rename_rate', 'target_extension_velocity',
+        'seq_vs_random_disk_ratio', 'urandom_bytes_per_sec',
+        'mmap_brk_rate', 'mprotect_rate', 'futex_rate',
+        'net_packet_rate', 'net_byte_volume', 'unique_dest_ip_rate',
+        'dns_query_rate', 'connection_failure_rate',
+        'child_spawn_rate', 'execve_rate',
+        'syscall_sequence_entropy', 'io_burstiness_std',
+        'dir_ops', 'drop_rate', 'ransom_note_hits', 'library_call_rate_openssl',
+        'vmrss_kb', 'mean_file_entropy',
+        'time_to_first_encryption_s', 'encryption_slope', 'file_entropy_delta',
+    ]
+
     with open(out_path, 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(header)
 
         for wid in range(max_window + 1):
-            # Use windows[wid] directly — defaultdict auto-creates with correct types
             d = windows[wid]
+            # Ensure set exists for unique_ips
+            if 'unique_ips' not in d:
+                d['unique_ips'] = set()
 
             # Scale to per-second (window is 0.1s)
             br = d['bytes_read'] * 10
@@ -366,7 +355,7 @@ def main():
                     break
 
             # Ransom note hits (heuristic: writes to files named README/HELP/DECRYPT)
-            ransom_note_hits = 0  # placeholder
+            ransom_note_hits = 0  # would need per-window file path tracking; placeholder
 
             w.writerow([
                 wid,
