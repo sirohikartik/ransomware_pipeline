@@ -1,5 +1,3 @@
-## Creates demo files, downloads all necessary tools and then runs the targeted binary to generate log files
-
 #!/usr/bin/env bash
 #
 # monitor.sh — Full behavioral instrumentation for Linux ransomware analysis
@@ -13,6 +11,7 @@
 #   --tracer strace|ltrace   (default: strace; ltrace auto-disabled under QEMU)
 #   --no-gui                 skip Xvfb fake display
 #   --no-dummy               skip dummy file seeding
+#   --num-files N            number of dummy files to seed (default: 85)
 #   --timeout N              kill after N seconds (default: 120)
 #   -- args...               arguments passed to the target binary
 #
@@ -54,7 +53,7 @@ fi
 if [[ "$MODE" != "run" ]]; then
     echo "Usage:"
     echo "  sudo $0 setup"
-    echo "  sudo $0 run <binary> [outdir] [watch_dir] [--timeout N] [--tracer strace|ltrace] [--no-gui] [--no-dummy] -- [args...]"
+    echo "  sudo $0 run <binary> [outdir] [watch_dir] [--timeout N] [--tracer strace|ltrace] [--no-gui] [--no-dummy] [--num-files N] -- [args...]"
     exit 1
 fi
 
@@ -67,15 +66,17 @@ shift $(( $# > 4 ? 4 : $# ))
 TRACER="strace"
 NO_GUI=0
 NO_DUMMY=0
+NUM_FILES=85
 TIMEOUT=120
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --tracer)   TRACER="$2"; shift 2 ;;
-        --no-gui)   NO_GUI=1; shift ;;
-        --no-dummy) NO_DUMMY=1; shift ;;
-        --timeout)  TIMEOUT="$2"; shift 2 ;;
-        --)         shift; break ;;
-        *)          break ;;
+        --tracer)     TRACER="$2"; shift 2 ;;
+        --no-gui)     NO_GUI=1; shift ;;
+        --no-dummy)   NO_DUMMY=1; shift ;;
+        --num-files)  NUM_FILES="$2"; shift 2 ;;
+        --timeout)    TIMEOUT="$2"; shift 2 ;;
+        --)           shift; break ;;
+        *)            break ;;
     esac
 done
 BIN_ARGS=("$@")
@@ -144,23 +145,40 @@ fi
 # DUMMY FILE SEEDING
 # ============================================================================
 if [[ $NO_DUMMY -eq 0 ]]; then
-    echo "[*] Seeding dummy files into $WATCHDIR..."
-    python3 - "$WATCHDIR" <<'PYEOF'
-import os, sys, zipfile, io
+    echo "[*] Seeding $NUM_FILES dummy files into $WATCHDIR..."
+    python3 - "$WATCHDIR" "$NUM_FILES" <<'PYEOF'
+import os, sys, zipfile, io, random
 
 watch = sys.argv[1]
+num_files = int(sys.argv[2])
+
+# Clean the directory first to ensure a fresh start
+if os.path.exists(watch):
+    for f in os.listdir(watch):
+        fp = os.path.join(watch, f)
+        if os.path.isfile(fp):
+            os.remove(fp)
+
 os.makedirs(watch, exist_ok=True)
 
+# Calculate distribution based on total requested files
+n_txt = max(1, int(num_files * 0.4))
+n_pdf = max(1, int(num_files * 0.2))
+n_pptx = max(1, int(num_files * 0.15))
+n_docx = max(1, int(num_files * 0.15))
+n_jpg = max(1, int(num_files * 0.05))
+n_png = max(1, num_files - n_txt - n_pdf - n_pptx - n_docx - n_jpg)
+
 # TXT files (low entropy)
-for i in range(30):
-    with open(os.path.join(watch, f"document_{i:03d}.txt"), "w") as f:
+for i in range(n_txt):
+    with open(os.path.join(watch, f"document_{i:05d}.txt"), "w") as f:
         f.write(f"CONFIDENTIAL — Financial Report #{i}\n")
         f.write("Account: 1234-5678-9012-3456\nSSN: 123-45-6789\n")
         f.write("Balance: $50,000.00\n")
         f.write("This document contains sensitive information.\n" * 20)
 
 # Minimal PDFs
-for i in range(15):
+for i in range(n_pdf):
     pdf = (
         b"%PDF-1.4\n"
         b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
@@ -172,11 +190,11 @@ for i in range(15):
         b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF\n"
     )
     pdf += b"% filler " * 500
-    with open(os.path.join(watch, f"report_{i:03d}.pdf"), "wb") as f:
+    with open(os.path.join(watch, f"report_{i:05d}.pdf"), "wb") as f:
         f.write(pdf)
 
 # Minimal PPTX (Office Open XML)
-for i in range(10):
+for i in range(n_pptx):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml",
@@ -191,11 +209,11 @@ for i in range(10):
         z.writestr("ppt/presentation.xml",
             f'<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
             f'<p:sldIdLst/><p:notesMasterIdLst/></p:presentation>')
-    with open(os.path.join(watch, f"presentation_{i:03d}.pptx"), "wb") as f:
+    with open(os.path.join(watch, f"presentation_{i:05d}.pptx"), "wb") as f:
         f.write(buf.getvalue())
 
 # Minimal DOCX
-for i in range(10):
+for i in range(n_docx):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml",
@@ -212,11 +230,11 @@ for i in range(10):
             f'<w:body><w:p><w:r><w:t>Confidential document content number {i}.</w:t></w:r></w:p>'
             f'<w:p><w:r><w:t>{"Lorem ipsum dolor sit amet. " * 50}</w:t></w:r></w:p>'
             f'</w:body></w:document>')
-    with open(os.path.join(watch, f"spreadsheet_{i:03d}.docx"), "wb") as f:
+    with open(os.path.join(watch, f"spreadsheet_{i:05d}.docx"), "wb") as f:
         f.write(buf.getvalue())
 
 # Minimal JPEG (fixed syntax)
-for i in range(10):
+for i in range(n_jpg):
     jpg = b''.join([
         b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00',
         b'\xff\xdb\x00C\x00', b'\x08' * 64,
@@ -225,18 +243,18 @@ for i in range(10):
         b'\xff\xda\x00\x08\x01\x01\x00\x00?\x00',
         b'\x55' * 2000, b'\xff\xd9',
     ])
-    with open(os.path.join(watch, f"photo_{i:03d}.jpg"), "wb") as f:
+    with open(os.path.join(watch, f"photo_{i:05d}.jpg"), "wb") as f:
         f.write(jpg)
 
 # Minimal PNG (fixed syntax)
-for i in range(10):
+for i in range(n_png):
     png = b''.join([
         b'\x89PNG\r\n\x1a\n',
         b'\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde',
         b'\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N',
         b'\x00\x00\x00\x00IEND\xaeB`\x82',
     ])
-    with open(os.path.join(watch, f"image_{i:03d}.png"), "wb") as f:
+    with open(os.path.join(watch, f"image_{i:05d}.png"), "wb") as f:
         f.write(png)
 
 total = sum(1 for x in os.listdir(watch) if os.path.isfile(os.path.join(watch, x)))
